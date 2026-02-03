@@ -3,16 +3,51 @@
 import argparse
 import logging
 import os
+import subprocess
+import threading
 from datetime import datetime
 
 import yaml
 import datasets
 from accelerate import PartialState
+from transformers import TrainerCallback
 from trl import GRPOConfig, GRPOTrainer
 
 logger = logging.getLogger(__name__)
 
 from .rewards import accuracy_reward, compute_metrics
+
+
+def upload_to_s3(local_path: str, s3_path: str, blocking: bool = False):
+    """Upload a directory to S3 using aws cli."""
+    def _upload():
+        cmd = ["aws", "s3", "sync", local_path, s3_path, "--quiet"]
+        logger.info("Uploading %s -> %s", local_path, s3_path)
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        if result.returncode != 0:
+            logger.error("S3 upload failed: %s", result.stderr)
+        else:
+            logger.info("Upload complete: %s", local_path)
+
+    if blocking:
+        _upload()
+    else:
+        threading.Thread(target=_upload, daemon=True).start()
+
+
+class S3UploadCallback(TrainerCallback):
+    """Callback to upload checkpoints to S3 after each save."""
+
+    def __init__(self, s3_base_path: str):
+        self.s3_base_path = s3_base_path
+
+    def on_save(self, args, state, control, **kwargs):
+        if not state.is_world_process_zero:
+            return control
+        ckpt_dir = f"{args.output_dir}/checkpoint-{state.global_step}"
+        s3_dest = f"{self.s3_base_path}checkpoint-{state.global_step}/"
+        upload_to_s3(ckpt_dir, s3_dest)
+        return control
 
 # Global storage for metrics (updated by reward function, read by trainer)
 _step_metrics = {}
@@ -149,11 +184,17 @@ def main():
 
     # Create trainer
     log_main("Initializing GRPOTrainer with reward function: accuracy_reward (with metrics logging)")
+    s3_path = cfg.get("s3_checkpoint_path")
+    callbacks = [S3UploadCallback(s3_path)] if s3_path else []
+    if s3_path:
+        log_main("S3 checkpoint uploads enabled: %s", s3_path)
+
     trainer = GRPOTrainer(
         model=cfg["model_name"],
         reward_funcs=[accuracy_reward_with_metrics],
         args=training_args,
         train_dataset=dataset,
+        callbacks=callbacks,
     )
 
     # Train
@@ -165,6 +206,12 @@ def main():
     log_main("Training complete, saving model to %s", cfg["output_dir"])
     trainer.save_model(cfg["output_dir"])
     log_main("Model saved")
+
+    # Upload final model to S3
+    if s3_path:
+        log_main("Uploading final model to S3...")
+        upload_to_s3(cfg["output_dir"], f"{s3_path}final/", blocking=True)
+        log_main("Final model uploaded to S3")
 
 
 if __name__ == "__main__":
