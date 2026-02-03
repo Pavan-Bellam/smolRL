@@ -390,7 +390,218 @@ eval:
 
 ---
 
-## 8. eval/run.py
+## 8. Training Pipeline
+
+### Overview
+
+Training uses GRPO (Group Relative Policy Optimization) via TRL to fine-tune a Qwen base model on mathematical reasoning. The key principle is **zero RL training** — reinforcement learning directly from the base model without prior supervised fine-tuning (SFT).
+
+### Entry Point
+
+```bash
+# Single GPU
+python -m src.train --config config.yaml
+
+# Multi-GPU with accelerate
+accelerate launch --num_processes 4 -m src.train --config config.yaml
+
+# Resume from checkpoint
+python -m src.train --config config.yaml --resume outputs/checkpoint-100
+```
+
+---
+
+## 9. Training Configuration Decisions
+
+### 9.1 Loss Type: DAPO
+
+```yaml
+loss_type: "dapo"
+```
+
+**What it does:** Uses token-level loss without per-sequence length normalization.
+
+**Why it matters:** Standard GRPO normalizes loss by sequence length, which biases the model toward shorter responses. For math reasoning, we want the model to develop longer chains of thought naturally. DAPO's length-rectified objective removes this bias, allowing response length to grow organically as the model learns to reason.
+
+### 9.2 KL Coefficient
+
+```yaml
+beta: 0.0001  # 1e-4
+```
+
+**What it does:** Controls how much the policy can drift from the reference (initial) model.
+
+**Why it matters:**
+- Too high (e.g., 0.1): Model barely changes, slow learning
+- Too low (e.g., 0): Model can collapse to degenerate outputs
+- 1e-4 is the sweet spot for 7B models — allows meaningful exploration while maintaining stability
+
+For larger models (>14B), use `beta: 0.001` (1e-3) as they need more regularization.
+
+### 9.3 Asymmetric Clipping (DAPO)
+
+```yaml
+epsilon: 0.2       # lower clip bound
+epsilon_high: 0.28 # upper clip bound
+```
+
+**What it does:** Uses different clip ranges for positive vs negative advantages.
+
+**Why it matters:** Standard PPO/GRPO clips both directions equally. But we want:
+- **Positive advantages** (good responses): More aggressive updates → learn good behaviors faster
+- **Negative advantages** (bad responses): Conservative updates → don't over-correct
+
+This prevents "entropy collapse" where the model becomes too confident too quickly and stops exploring.
+
+### 9.4 Overlong Filtering
+
+```yaml
+mask_truncated_completions: true
+```
+
+**What it does:** Excludes truncated (hit max length) completions from the loss.
+
+**Why it matters:** Truncated responses are incomplete reasoning — the model was cut off mid-thought. Training on these teaches nothing useful and can destabilize learning. By masking them, we only learn from complete reasoning chains.
+
+### 9.5 Entropy Token Filtering
+
+```yaml
+top_entropy_quantile: 0.2
+```
+
+**What it does:** Only backpropagates through the top 20% highest-entropy tokens.
+
+**Why it matters:** Low-entropy tokens are "easy" predictions the model is already confident about. High-entropy tokens are where the model is uncertain — these are the decision points that matter for reasoning. Focusing gradients on uncertain tokens makes learning more efficient.
+
+### 9.6 Generation Settings
+
+```yaml
+num_generations: 8
+max_completion_length: 8192
+temperature: 1.0
+```
+
+| Parameter | Value | Rationale |
+|-----------|-------|-----------|
+| `num_generations` | 8 | More rollouts per prompt → better advantage estimation. 8 balances quality vs compute. |
+| `max_completion_length` | 8192 | Long enough for multi-step reasoning. Truncation hurts learning. |
+| `temperature` | 1.0 | Full diversity in exploration. Lower temps reduce exploration too early. |
+
+### 9.7 Batch Size
+
+```yaml
+per_device_train_batch_size: 2
+gradient_accumulation_steps: 16
+```
+
+**Effective batch:** 2 prompts × 4 GPUs × 16 accumulation × 8 generations = **1024 total sequences**
+
+**Why this matters:**
+- Larger batches → more stable advantage estimates
+- 1024 is large enough for reliable gradient signal
+- With 8K training data, this gives ~62 steps per epoch — enough granularity to track learning
+
+---
+
+## 10. Reward Function Design
+
+### 10.1 Accuracy-Only Reward
+
+```python
+reward = 1.0 if answer_correct else 0.0
+```
+
+**Why no format reward:** Format rewards (e.g., +0.5 for using `\boxed{}`) hinder exploration for base models. Early in training, the model doesn't know how to format answers — penalizing wrong format means penalizing correct mathematical reasoning. By using accuracy-only rewards, the model can explore freely and learn formatting naturally.
+
+### 10.2 Flexible Answer Extraction
+
+The reward function uses multi-tier extraction:
+
+1. `"final answer is $...$"` (minerva style)
+2. `\boxed{...}`
+3. `"the answer is"` / `"he answer is"`
+4. `"final answer is"`
+5. Last number in text (fallback)
+
+**Why:** Base models don't reliably use `\boxed{}` at first. Rigid extraction would give 0 reward to correct answers with wrong format, blocking learning. The fallback chain ensures correct reasoning gets rewarded regardless of presentation.
+
+### 10.3 Math Equality Comparison
+
+Uses `math_equal()` from `eval/grader.py` with:
+- String normalization (LaTeX cleanup, fraction fixing)
+- Numeric comparison with tolerance
+- Symbolic comparison via SymPy
+
+**Why:** Mathematical answers have many equivalent forms (`0.5`, `1/2`, `\frac{1}{2}`). Exact string matching would incorrectly penalize correct answers.
+
+---
+
+## 11. Training Metrics
+
+Metrics are logged to W&B without affecting the reward signal.
+
+### 11.1 metrics/accuracy
+
+**What:** Fraction of completions with correct answers.
+
+**Why it matters:** Primary measure of learning progress. Should increase over training.
+
+### 11.2 metrics/format_rate
+
+**What:** Fraction of completions containing `\boxed{}`.
+
+**Why it matters:** Tracks whether the model learns to use the expected output format without being explicitly rewarded for it. If accuracy increases but format_rate stays low, the model is reasoning correctly but not presenting answers conventionally.
+
+### 11.3 metrics/accuracy_given_format
+
+**What:** Accuracy among completions that have `\boxed{}`.
+
+**Why it matters:** Tests the hypothesis "does formatting correlate with correctness?" If this is much higher than overall accuracy, the model uses `\boxed{}` when it's confident. If similar, formatting is independent of correctness.
+
+### 11.4 metrics/accuracy_without_format
+
+**What:** Accuracy among completions without `\boxed{}`.
+
+**Why it matters:** Reveals whether the model can reason correctly even without formal structure. High values here mean the flexible extraction is working — correct answers aren't being missed due to format.
+
+### Interpreting the Metrics Together
+
+| Pattern | Interpretation |
+|---------|----------------|
+| accuracy ↑, format_rate ↑ | Healthy learning — model improves reasoning AND presentation |
+| accuracy ↑, format_rate flat | Model learns to reason but not format — consider longer training |
+| accuracy_given_format >> accuracy_without_format | Model uses format as a confidence signal |
+| accuracy_given_format ≈ accuracy_without_format | Format is decorative, not functional |
+
+---
+
+## 12. Dataset Format
+
+Training data must be a parquet file with these columns:
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `prompt` | list[dict] | Chat-formatted prompt with `content` and `role` keys |
+| `answer` | string | Ground truth answer |
+
+### Prompt Format
+
+```python
+[{
+    "content": "<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\n{question}\nPlease reason step by step, and put your final answer within \\boxed{{}}.<|im_end|>\n<|im_start|>assistant\n",
+    "role": "user"
+}]
+```
+
+The prompt uses Qwen's ChatML template. The model continues generating from `<|im_start|>assistant\n`.
+
+### Validation
+
+`build_dataset()` validates that both `prompt` and `answer` columns exist. Missing columns raise a clear error with the available column names.
+
+---
+
+## 13. eval/run.py
 
 Pipeline entry point that wires steps 1–4 together. This is what you actually run.
 
