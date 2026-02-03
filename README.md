@@ -63,6 +63,18 @@ Key parameters in `config.yaml` under the `train` key:
 | `epsilon_high` | `0.28` | Upper clip bound (prevents entropy collapse) |
 | `num_generations` | `8` | Rollouts per prompt |
 | `mask_truncated_completions` | `true` | Filter overlong sequences |
+| `s3_checkpoint_path` | `null` | S3 path for checkpoint uploads (optional) |
+
+### S3 Checkpointing
+
+To automatically upload checkpoints to S3:
+
+```yaml
+train:
+  s3_checkpoint_path: "s3://your-bucket/checkpoints/"
+```
+
+Requires AWS CLI configured with appropriate credentials.
 
 ### Reward Function
 

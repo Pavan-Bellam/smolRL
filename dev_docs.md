@@ -501,6 +501,20 @@ gradient_accumulation_steps: 16
 - 1024 is large enough for reliable gradient signal
 - With 8K training data, this gives ~62 steps per epoch — enough granularity to track learning
 
+### 9.8 S3 Checkpoint Uploads
+
+```yaml
+s3_checkpoint_path: "s3://bucket/checkpoints/"  # or null to disable
+```
+
+**What it does:** Automatically uploads checkpoints to S3 after each save, and uploads the final model when training completes.
+
+**Why it matters:**
+- Training on cloud instances with ephemeral storage risks losing checkpoints
+- S3 provides durable storage for checkpoints and final models
+- Non-blocking uploads (except final) avoid slowing down training
+- Requires AWS CLI configured with credentials (`aws configure`)
+
 ---
 
 ## 10. Reward Function Design
