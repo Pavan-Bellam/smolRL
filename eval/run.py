@@ -1,6 +1,12 @@
 """
 Eval pipeline entry point — connects steps 1-4.
 
+Pipeline order:
+  1. Prepare all benchmarks
+  2. Generate all (single vLLM initialization)
+  3. Score all
+  4. Report all to W&B
+
 Usage:
     python eval/run.py
     python eval/run.py --benchmarks math500 gsm8k
@@ -63,69 +69,133 @@ def main():
     data_dir.mkdir(parents=True, exist_ok=True)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # Add eval/ to sys.path so score.py can import grader
+    # Add eval/ to sys.path so we can import modules
     eval_dir = Path(__file__).resolve().parent
     if str(eval_dir) not in sys.path:
         sys.path.insert(0, str(eval_dir))
 
+    # Build paths for all benchmarks
+    benchmark_paths = {}
     for benchmark in args.benchmarks:
-        print(f"\n{'#' * 60}")
-        print(f"  Benchmark: {benchmark}")
-        print(f"{'#' * 60}")
+        benchmark_paths[benchmark] = {
+            "data": data_dir / f"{benchmark}.jsonl",
+            "response": output_dir / f"{benchmark}_responses.jsonl",
+            "scored": output_dir / f"{benchmark}_scored.jsonl",
+        }
 
-        data_path = data_dir / f"{benchmark}.jsonl"
-        response_path = output_dir / f"{benchmark}_responses.jsonl"
-        scored_path = output_dir / f"{benchmark}_scored.jsonl"
+    # =========================================================================
+    # Step 1: Prepare all datasets
+    # =========================================================================
+    print(f"\n{'=' * 60}")
+    print("  STEP 1: Prepare datasets")
+    print(f"{'=' * 60}")
 
-        # Step 1: Prepare datasets
-        if not args.skip_prepare:
-            from prepare_datasets import BENCHMARKS, prepare_benchmark
+    if not args.skip_prepare:
+        from prepare_datasets import BENCHMARKS, prepare_benchmark
 
+        for benchmark in args.benchmarks:
             if benchmark not in BENCHMARKS:
                 print(f"Unknown benchmark: {benchmark}, skipping.")
                 continue
-
             prepare_benchmark(benchmark, BENCHMARKS[benchmark], data_dir)
-        else:
-            print(f"\n[skip-prepare] Reusing {data_path}")
+    else:
+        print("[skip-prepare] Reusing existing data files")
+        for benchmark in args.benchmarks:
+            data_path = benchmark_paths[benchmark]["data"]
             if not data_path.exists():
                 print(f"  ERROR: {data_path} not found. Run without --skip-prepare first.")
-                continue
+                args.benchmarks.remove(benchmark)
 
-        # Step 2: Generate responses
-        if not args.skip_generate:
-            from generate import main as generate_main
+    # =========================================================================
+    # Step 2: Generate responses (single vLLM initialization)
+    # =========================================================================
+    print(f"\n{'=' * 60}")
+    print("  STEP 2: Generate responses")
+    print(f"{'=' * 60}")
 
-            generate_main(str(data_path), args.config, str(output_dir))
-        else:
-            print(f"\n[skip-generate] Reusing {response_path}")
+    if not args.skip_generate:
+        from generate import build_llm, build_sampling_params, get_stop_token_ids, load_prompts, save_results
+
+        # Initialize vLLM once
+        print(f"\nInitializing vLLM with model: {eval_cfg['model_name']}")
+        llm = build_llm(eval_cfg)
+        stop_token_ids = get_stop_token_ids(eval_cfg["model_name"])
+        sampling_params = build_sampling_params(eval_cfg, stop_token_ids)
+
+        # Generate for each benchmark
+        for benchmark in args.benchmarks:
+            paths = benchmark_paths[benchmark]
+            print(f"\n--- Generating for {benchmark} ---")
+
+            rows = load_prompts(str(paths["data"]))
+            print(f"Loaded {len(rows)} prompts")
+
+            prompts = [row["prompt"] for row in rows]
+            outputs = llm.generate(prompts, sampling_params)
+
+            for row, output in zip(rows, outputs):
+                row["response"] = output.outputs[0].text
+
+            save_results(rows, str(paths["response"]))
+
+        # Clean up vLLM to free GPU memory
+        del llm
+        print("\nvLLM instance released.")
+    else:
+        print("[skip-generate] Reusing existing response files")
+        for benchmark in args.benchmarks:
+            response_path = benchmark_paths[benchmark]["response"]
             if not response_path.exists():
                 print(f"  ERROR: {response_path} not found. Run without --skip-generate first.")
-                continue
+                args.benchmarks.remove(benchmark)
 
-        # Step 3: Score responses
-        from score import load_responses, score_all, compute_stats, save_results, print_report
+    # =========================================================================
+    # Step 3: Score all responses
+    # =========================================================================
+    print(f"\n{'=' * 60}")
+    print("  STEP 3: Score responses")
+    print(f"{'=' * 60}")
 
-        print(f"\nScoring {response_path}...")
-        rows = load_responses(str(response_path))
+    from score import load_responses, score_all, compute_stats, save_results as save_scored, print_report
+
+    all_stats = {}
+    for benchmark in args.benchmarks:
+        paths = benchmark_paths[benchmark]
+        print(f"\n--- Scoring {benchmark} ---")
+
+        rows = load_responses(str(paths["response"]))
         rows = score_all(rows)
         stats = compute_stats(rows)
-        save_results(rows, str(scored_path))
+        save_scored(rows, str(paths["scored"]))
         print_report(stats, benchmark)
 
-        # Step 4: W&B logging
-        if not args.no_wandb:
-            wandb_cfg = eval_cfg.get("wandb", {})
-            if wandb_cfg.get("enabled", True):
-                from report import log_to_wandb
+        all_stats[benchmark] = stats
 
-                log_to_wandb(stats, config, benchmark, str(scored_path))
-            else:
-                print("W&B logging disabled in config.")
+    # =========================================================================
+    # Step 4: Report all to W&B
+    # =========================================================================
+    print(f"\n{'=' * 60}")
+    print("  STEP 4: Report to W&B")
+    print(f"{'=' * 60}")
+
+    if not args.no_wandb:
+        wandb_cfg = eval_cfg.get("wandb", {})
+        if wandb_cfg.get("enabled", True):
+            from report import log_to_wandb
+
+            for benchmark in args.benchmarks:
+                paths = benchmark_paths[benchmark]
+                stats = all_stats[benchmark]
+                print(f"\n--- Logging {benchmark} to W&B ---")
+                log_to_wandb(stats, config, benchmark, str(paths["scored"]))
         else:
-            print("W&B logging skipped (--no-wandb).")
+            print("W&B logging disabled in config.")
+    else:
+        print("W&B logging skipped (--no-wandb).")
 
-    print("\nPipeline complete.")
+    print(f"\n{'=' * 60}")
+    print("  Pipeline complete.")
+    print(f"{'=' * 60}\n")
 
 
 if __name__ == "__main__":

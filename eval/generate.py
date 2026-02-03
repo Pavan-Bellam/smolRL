@@ -46,7 +46,6 @@ def build_llm(cfg: dict) -> LLM:
         swap_space=vllm_cfg["swap_space"],
         dtype=vllm_cfg["dtype"],
         enforce_eager=vllm_cfg["enforce_eager"],
-        max_seq_len_to_capture=vllm_cfg["max_seq_len_to_capture"],
         max_num_seqs=vllm_cfg["max_num_seqs"],
         max_model_len=vllm_cfg["max_model_len"],
         enable_prefix_caching=vllm_cfg["enable_prefix_caching"],
