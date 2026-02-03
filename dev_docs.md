@@ -501,7 +501,26 @@ gradient_accumulation_steps: 16
 - 1024 is large enough for reliable gradient signal
 - With 8K training data, this gives ~62 steps per epoch — enough granularity to track learning
 
-### 9.8 S3 Checkpoint Uploads
+### 9.8 Checkpoint Saving
+
+```yaml
+save_strategy: "steps"
+save_steps: 10
+save_total_limit: 3
+```
+
+| Parameter | Value | Rationale |
+|-----------|-------|-----------|
+| `save_strategy` | `"steps"` | Save based on optimization steps, not epochs |
+| `save_steps` | `10` | ~6 checkpoints per epoch with 62 steps total |
+| `save_total_limit` | `3` | Keeps disk usage bounded; older checkpoints deleted |
+
+**Why it matters:**
+- Enables resuming from interruptions (`--resume outputs/.../checkpoint-N`)
+- Frequent saves reduce lost progress on failures
+- Limit prevents disk exhaustion on long runs
+
+### 9.9 S3 Checkpoint Uploads
 
 ```yaml
 s3_checkpoint_path: "s3://bucket/checkpoints/"  # or null to disable

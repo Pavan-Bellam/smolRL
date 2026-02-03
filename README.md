@@ -63,6 +63,8 @@ Key parameters in `config.yaml` under the `train` key:
 | `epsilon_high` | `0.28` | Upper clip bound (prevents entropy collapse) |
 | `num_generations` | `8` | Rollouts per prompt |
 | `mask_truncated_completions` | `true` | Filter overlong sequences |
+| `save_steps` | `10` | Save checkpoint every N steps |
+| `save_total_limit` | `3` | Keep only last N checkpoints |
 | `s3_checkpoint_path` | `null` | S3 path for checkpoint uploads (optional) |
 
 ### S3 Checkpointing

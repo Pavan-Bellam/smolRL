@@ -28,11 +28,14 @@ train:
   training:
     per_device_train_batch_size: 2    # 2 prompts per GPU (× 8 generations each)
     gradient_accumulation_steps: 16   # 2 × 4 GPUs × 16 = 128 prompts × 8 gens = 1024 total
-    num_train_epochs: 1
+    max_steps: 200
     learning_rate: 1e-6
     warmup_ratio: 0.1
     bf16: true
     gradient_checkpointing: true
+    save_strategy: "steps"
+    save_steps: 10                    # save every 10 steps (~6 checkpoints per epoch)
+    save_total_limit: 3               # keep only last 3 checkpoints
 
   vllm:
     use_vllm: true
