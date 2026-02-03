@@ -31,6 +31,13 @@ MathSmall/
 
 ## Training
 
+### Data Setup
+
+```bash
+mkdir -p data
+wget -O data/train.parquet https://huggingface.co/datasets/hkust-nlp/SimpleRL-Zoo-Data/resolve/main/simplelr_qwen_level3to5/train.parquet
+```
+
 ### Quick Start
 
 ```bash

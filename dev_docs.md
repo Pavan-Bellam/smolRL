@@ -577,6 +577,15 @@ Metrics are logged to W&B without affecting the reward signal.
 
 ## 12. Dataset Format
 
+### Download
+
+```bash
+mkdir -p data
+wget -O data/train.parquet https://huggingface.co/datasets/hkust-nlp/SimpleRL-Zoo-Data/resolve/main/simplelr_qwen_level3to5/train.parquet
+```
+
+### Schema
+
 Training data must be a parquet file with these columns:
 
 | Column | Type | Description |
