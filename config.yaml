@@ -2,6 +2,7 @@ train:
   model_name: "Qwen/Qwen2.5-7B"
   dataset: "data/train.parquet"  # MATH lv.3-5 (~8K problems)
   output_dir: "outputs/qwen2.5-7b-grpo"
+  s3_checkpoint_path: null  # e.g., "s3://bucket/checkpoints/" (optional)
 
   grpo:
     num_generations: 8              # rollouts per prompt
