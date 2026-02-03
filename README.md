@@ -4,12 +4,16 @@ GRPO training for mathematical reasoning on Qwen model using TRL.
 
 ## Overview
 
-MathSmall trains small language models on mathematical reasoning using GRPO (Group Relative Policy Optimization) with the TRL library. The base model family is Qwen.
+MathSmall trains small language models on mathematical reasoning using GRPO (Group Relative Policy Optimization) with the TRL library. The approach uses DAPO (Decoupled Alignment Policy Optimization) loss for stable training directly on base models without SFT warmup.
 
 ## Project Structure
 
 ```
 MathSmall/
+├── src/                           # Training code
+│   ├── train.py                   # GRPO training entry point
+│   ├── rewards.py                 # Reward functions and metrics
+│   └── answer_extraction.py       # Multi-tier answer extraction
 ├── eval/                          # Evaluation pipeline
 │   ├── prepare_datasets.py        # Step 1: Download & format benchmarks
 │   ├── generate.py                # Step 2: vLLM offline inference
@@ -20,11 +24,52 @@ MathSmall/
 │   ├── data/                      # Prepared benchmark JSONL files (generated)
 │   └── outputs/                   # Model responses & scored JSONL files (generated)
 ├── data/
-│   └── train.parquet              # Training data
+│   └── train.parquet              # Training data (MATH lv.3-5, ~8K problems)
 ├── config.yaml                    # Project configuration
-├── main.py                        # Training entry point
 └── pyproject.toml                 # Project metadata & deps
 ```
+
+## Training
+
+### Quick Start
+
+```bash
+# Single GPU
+python -m src.train --config config.yaml
+
+# Multi-GPU with accelerate
+accelerate launch --num_processes 4 -m src.train --config config.yaml
+
+# Resume from checkpoint
+python -m src.train --config config.yaml --resume outputs/qwen2.5-7b-grpo/checkpoint-100
+```
+
+### Training Configuration
+
+Key parameters in `config.yaml` under the `train` key:
+
+| Parameter | Value | Purpose |
+|-----------|-------|---------|
+| `loss_type` | `dapo` | Length-rectified, token-level loss |
+| `beta` | `0.0001` | KL penalty as loss term |
+| `epsilon` | `0.2` | Lower PPO clip bound |
+| `epsilon_high` | `0.28` | Upper clip bound (prevents entropy collapse) |
+| `num_generations` | `8` | Rollouts per prompt |
+| `mask_truncated_completions` | `true` | Filter overlong sequences |
+
+### Reward Function
+
+Uses accuracy-only rewards (no format penalty) to encourage exploration:
+- Multi-tier answer extraction: `\boxed{}`, "the answer is", last number fallback
+- Binary reward: 1.0 for correct, 0.0 for incorrect
+
+### W&B Metrics
+
+Training logs these metrics per step:
+- `metrics/accuracy` - Fraction of correct answers
+- `metrics/format_rate` - Fraction using `\boxed{}`
+- `metrics/accuracy_given_format` - Accuracy among formatted responses
+- `metrics/accuracy_without_format` - Accuracy among unformatted responses
 
 ## Benchmarks
 
@@ -72,7 +117,11 @@ python eval/run.py --no-wandb
 
 ## Configuration
 
-All eval settings live in `config.yaml` under the `eval` key. See `config.yaml` for vLLM engine settings, sampling parameters, and W&B configuration.
+All settings live in `config.yaml`:
+- `train` - GRPO training parameters, batch sizes, optimizer settings
+- `eval` - vLLM engine settings, sampling parameters, benchmark configuration
+
+Both sections have their own `wandb` subsection for logging configuration.
 
 ## Tests
 
