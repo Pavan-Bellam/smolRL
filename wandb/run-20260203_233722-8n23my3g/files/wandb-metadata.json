@@ -1,0 +1,63 @@
+{
+  "os":  "Linux-5.15.0-133-generic-x86_64-with-glibc2.39",
+  "python":  "CPython 3.12.12",
+  "startedAt":  "2026-02-03T23:37:22.375434Z",
+  "args":  [
+    "--config",
+    "config.yaml"
+  ],
+  "program":  "-m src.train",
+  "git":  {
+    "remote":  "https://github.com/Pavan-Bellam/smolRL.git",
+    "commit":  "3901867b9bc11f3b51d768eb7150de71b4457354"
+  },
+  "email":  "pavan94411@gmail.com",
+  "root":  "/workspace/smolRL",
+  "host":  "45c3b90e9005",
+  "executable":  "/workspace/smolRL/.venv/bin/python",
+  "cpu_count":  64,
+  "cpu_count_logical":  128,
+  "gpu":  "NVIDIA H100 80GB HBM3",
+  "gpu_count":  4,
+  "disk":  {
+    "/":  {
+      "total":  "343597383680",
+      "used":  "32782426112"
+    }
+  },
+  "memory":  {
+    "total":  "2164170924032"
+  },
+  "gpu_nvidia":  [
+    {
+      "name":  "NVIDIA H100 80GB HBM3",
+      "memoryTotal":  "85520809984",
+      "cudaCores":  16896,
+      "architecture":  "Hopper",
+      "uuid":  "GPU-720fffdc-6e58-b75d-34fc-58721ce8ffeb"
+    },
+    {
+      "name":  "NVIDIA H100 80GB HBM3",
+      "memoryTotal":  "85520809984",
+      "cudaCores":  16896,
+      "architecture":  "Hopper",
+      "uuid":  "GPU-039ce12c-d365-93b9-a933-ece36e395688"
+    },
+    {
+      "name":  "NVIDIA H100 80GB HBM3",
+      "memoryTotal":  "85520809984",
+      "cudaCores":  16896,
+      "architecture":  "Hopper",
+      "uuid":  "GPU-ed1d605a-7270-2d60-a6ea-47f33c9c1bbb"
+    },
+    {
+      "name":  "NVIDIA H100 80GB HBM3",
+      "memoryTotal":  "85520809984",
+      "cudaCores":  16896,
+      "architecture":  "Hopper",
+      "uuid":  "GPU-a859ee85-9eee-0d06-5eed-0cc068d822f4"
+    }
+  ],
+  "cudaVersion":  "12.6",
+  "writerId":  "38e2aoa25rkdisr1yxcf6l2as4iinp62"
+}

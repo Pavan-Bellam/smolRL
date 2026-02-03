@@ -1,0 +1,101 @@
+                        elif isinstance(module, bnb.nn.Linear8bitLt):
+                            raise ValueError("vLLM does not support in-flight 8-bit quantization.")
+                self.llm = LLM(
+                    model=model.name_or_path,
+                    tensor_parallel_size=args.vllm_tensor_parallel_size,
+                    gpu_memory_utilization=self.vllm_gpu_memory_utilization,
+                    max_num_seqs=self.args.per_device_train_batch_size
+                    * self.vllm_tensor_parallel_size
+                    * self.args.steps_per_generation,
+                    max_model_len=self.args.vllm_max_model_length,
+                    distributed_executor_backend="external_launcher",
+                    # Feed identical seed for tp groups to ensure sampling results are the same across workers
+                    seed=self.accelerator.process_index // self.vllm_tensor_parallel_size,
+                    # Latest vLLM v1 memory profiler is misled by the high default value (i.e., 32768) - thinking there's not enough memory
+                    max_num_batched_tokens=4096,
+                    model_impl=self.args.vllm_model_impl,
+                    enable_sleep_mode=self.args.vllm_enable_sleep_mode,
+                    # Important so temperature scaling/logit tweaking affects the TIS log probs
+                    logprobs_mode="processed_logprobs",
+                    quantization=vllm_quantization,
+                )
+                if self.args.vllm_enable_sleep_mode:
+                    self.llm.sleep(level=2)
+            else:
+                raise ValueError(f"vllm_mode must be either 'server' or 'colocate', got '{self.vllm_mode}'.")
+
+            # vLLM specific sampling arguments
+            self.structured_outputs_regex = args.vllm_structured_outputs_regex
+
+            self._last_loaded_step = -1  # tag to avoid useless loading during grad accumulation
+
+            # When using vLLM, the main process is responsible for loading the model weights. This can cause process
+            # desynchronization and seems to lead to DeepSpeed hanging during initialization. To prevent this, we
+            # synchronize all processes after vLLM has been fully initialized.
+            self.accelerator.wait_for_everyone()
+        else:
+            generation_kwargs = {
+                "max_new_tokens": self.max_completion_length,
+                "do_sample": True,
+                "pad_token_id": tokenizer.pad_token_id,
+                "bos_token_id": tokenizer.bos_token_id,
+                "eos_token_id": tokenizer.eos_token_id,
+                "temperature": self.temperature,
+                "top_p": self.top_p,
+                "top_k": self.top_k,
+                "min_p": self.min_p,
+                "repetition_penalty": self.repetition_penalty,
+                "cache_implementation": args.cache_implementation,
+            }
+            if args.generation_kwargs is not None:
+                generation_kwargs.update(args.generation_kwargs)
+            self.generation_config = GenerationConfig(**generation_kwargs)
+            # Keep training-specific generation kwargs to overwrite model's original generation config
+            self.generation_kwargs = generation_kwargs
+
+        # Gradient accumulation requires scaled loss. Normally, loss scaling in the parent class depends on whether the
+        # model accepts loss-related kwargs. Since we compute our own loss, this check is irrelevant. We set
+        # self.model_accepts_loss_kwargs to False to enable scaling.
+        self.model_accepts_loss_kwargs = False
+
+        # Add tags to the model
+        self.model.add_model_tags(self._tag_names)
+
+        if self.ref_model is not None:
+            if self.is_deepspeed_enabled:
+                self.ref_model = prepare_deepspeed(self.ref_model, self.accelerator)
+            elif self.is_fsdp_enabled:
+                self.ref_model = prepare_fsdp(self.ref_model, self.accelerator)
+            else:
+                self.ref_model = self.accelerator.prepare_model(self.ref_model, evaluation_mode=True)
+
+        if args.sync_ref_model:
+            self.add_callback(SyncRefModelCallback(ref_model=self.ref_model, accelerator=self.accelerator))
+
+        for i, reward_func in enumerate(self.reward_funcs):
+            if isinstance(reward_func, PreTrainedModel):
+                if self.is_deepspeed_enabled:
+                    self.reward_funcs[i] = prepare_deepspeed(reward_func, self.accelerator)
+                else:
+                    # set device placement to True to make `prepare_model` move `reward_func` to device when using fsdp
+                    self.reward_funcs[i] = self.accelerator.prepare_model(
+                        reward_func, evaluation_mode=True, device_placement=True
+                    )
+
+    def _set_signature_columns_if_needed(self):
+        # If `self.args.remove_unused_columns` is True, non-signature columns are removed.
+        # By default, this method sets `self._signature_columns` to the model's expected inputs (usually, "input_ids"
+        # and "attention_mask"). In GRPOTrainer, we preprocess data, so using the model's signature columns doesn't
+        # work. Instead, we set them to the columns expected by the `training_step` method, hence the override.
+        if self._signature_columns is None:
+            self._signature_columns = ["prompt", "image", "images"]
+
+    # This method overrides `Trainer.get_train_dataloader` to support our custom batching strategy.
+    # Instead of returning a standard per-step batch (i.e., `per_device_batch_size), our dataloader loads an
+    # *generation* batch (i.e., `per_device_batch_size × steps_per_generation`). This allows us to generate completions
+    # once every steps_per_generation step—rather than once per accumulation step—which is significantly more
+    # efficient. The only change from the original implementation is multiplying the batch size by
+    # `steps_per_generation`. Thus, `_prepare_inputs` is called with this *generation* batch, and it handles the
+    # splitting internally.
+    # Maintenance note: This method is a copy-paste of the original `Trainer.get_train_dataloader` with only one line
+    # modification. As a result, some parts of the method aren't relevant to GRPO, but we keep them to stay one line

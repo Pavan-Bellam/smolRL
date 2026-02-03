@@ -2,7 +2,7 @@ train:
   model_name: "Qwen/Qwen2.5-7B"
   dataset: "data/train.parquet"  # MATH lv.3-5 (~8K problems)
   output_dir: "outputs/qwen2.5-7b-grpo"
-  s3_checkpoint_path: null  # e.g., "s3://bucket/checkpoints/" (optional)
+  s3_checkpoint_path: "s3://smolml/checkpoints/" 
 
   grpo:
     num_generations: 8              # rollouts per prompt
@@ -13,7 +13,7 @@ train:
     loss_type: "dapo"
 
     # KL as loss term (1e-4 for models ≤14B)
-    beta: 0.0001
+#    beta: 0.0001
 
     # DAPO asymmetric clipping (prevents entropy collapse)
     epsilon: 0.2                    # lower clip bound
@@ -28,18 +28,17 @@ train:
   training:
     per_device_train_batch_size: 2    # 2 prompts per GPU (× 8 generations each)
     gradient_accumulation_steps: 16   # 2 × 4 GPUs × 16 = 128 prompts × 8 gens = 1024 total
-    max_steps: 200
-    learning_rate: 1e-6
-    warmup_ratio: 0.1
+    max_steps: 500
+    learning_rate: 0.000001
     bf16: true
     gradient_checkpointing: true
     save_strategy: "steps"
-    save_steps: 10                    # save every 10 steps (~6 checkpoints per epoch)
+    save_steps: 50                    # save every 10 steps (~6 checkpoints per epoch)
     save_total_limit: 3               # keep only last 3 checkpoints
 
   vllm:
-    use_vllm: true
-    gpu_memory_utilization: 0.9
+    use_vllm: false
+    vllm_mode: "colocate"
 
   wandb:
     project: "mathsmall-train"

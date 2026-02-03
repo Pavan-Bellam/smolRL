@@ -166,6 +166,8 @@ def main():
     grpo_args.update(cfg.get("logging", {}))
 
     training_args = GRPOConfig(**grpo_args)
+    grpo_args["model_init_kwargs"] = {"device_map": None}
+    training_args = GRPOConfig(**grpo_args)
     log_main("Built GRPOConfig: output_dir=%s, num_generations=%s, lr=%s",
              training_args.output_dir,
              training_args.num_generations,
@@ -195,6 +197,7 @@ def main():
         args=training_args,
         train_dataset=dataset,
         callbacks=callbacks,
+    #    model_init_kwargs={"device_map": None},
     )
 
     # Train
