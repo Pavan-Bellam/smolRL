@@ -4,7 +4,7 @@ aiohttp==3.13.3
 aiosignal==1.4.0
 annotated-doc==0.0.4
 annotated-types==0.7.0
-antlr4-python3-runtime==4.7.2
+antlr4-python3-runtime==4.11.1
 anyio==4.12.1
 astor==0.8.1
 attrs==25.4.0
@@ -52,7 +52,6 @@ jiter==0.13.0
 jsonschema==4.26.0
 jsonschema-specifications==2025.9.1
 lark==1.2.2
-latex2sympy2==1.9.1
 llguidance==0.7.30
 llvmlite==0.44.0
 lm-format-enforcer==0.11.3

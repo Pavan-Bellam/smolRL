@@ -295,7 +295,7 @@ Each response goes through three stages:
    - **Exact string match** — case-insensitive string comparison
    - **Numeric equality** — both parse as numbers, compared with `math.isclose(rel_tol=1e-4)`, with optional percentage variants (x, x/100, x*100)
    - **Format normalization** — strip brackets, compare tuple/matrix elements recursively, handle equation forms
-   - **Symbolic equality** — parse with SymPy (`parse_latex`, `parse_expr`, `latex2sympy`) then compare via `simplify(a - b) == 0`, `.equals()`, or numeric evaluation
+   - **Symbolic equality** — parse with SymPy (`parse_latex`, `parse_expr`) then compare via `simplify(a - b) == 0`, `.equals()`, or numeric evaluation
    - **Timeout protection** — symbolic comparison runs in a subprocess with 1s timeout to avoid hangs
 
 ### Scoring Module: eval/grader.py
@@ -311,7 +311,7 @@ The comparison logic lives in `eval/grader.py`, ported from the reference implem
 | `numeric_equal(a, b)` | `math.isclose` with `rel_tol=1e-4` |
 | `call_with_timeout(func, ...)` | Multiprocessing timeout wrapper (1s default) |
 
-Dependencies: `sympy`, `latex2sympy2`, `regex`
+Dependencies: `sympy`, `regex`
 
 ### Output Format
 
