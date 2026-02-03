@@ -1,5 +1,5 @@
 eval:
-  model_name: "Qwen/Qwen2.5-0.5B-Instruct"
+  model_name: "Qwen/Qwen2.5-7B"
 
   vllm:
     tensor_parallel_size: 1
@@ -7,9 +7,8 @@ eval:
     swap_space: 4
     dtype: "bfloat16"
     enforce_eager: false
-    max_seq_len_to_capture: 8192
     max_num_seqs: 256
-    max_model_len: 8192
+    max_model_len: 16384
     enable_prefix_caching: true
     distributed_executor_backend: "mp"
     seed: 42
@@ -19,7 +18,7 @@ eval:
     top_p: 0.95
     top_k: 50
     min_p: 0.0
-    max_tokens: 2048
+    max_tokens: 16384
     repetition_penalty: 1.0
     frequency_penalty: 0.0
     presence_penalty: 0.0
