@@ -35,23 +35,11 @@ def load_prompts(jsonl_path: str) -> list[dict]:
 
 
 def build_llm(cfg: dict) -> LLM:
-    """Build a vllm.LLM instance from the config dict."""
-    model_name = cfg["model_name"]
-    vllm_cfg = cfg["vllm"]
+    """Build a vllm.LLM instance from the config dict.
 
-    return LLM(
-        model=model_name,
-        tensor_parallel_size=vllm_cfg["tensor_parallel_size"],
-        gpu_memory_utilization=vllm_cfg["gpu_memory_utilization"],
-        swap_space=vllm_cfg["swap_space"],
-        dtype=vllm_cfg["dtype"],
-        enforce_eager=vllm_cfg["enforce_eager"],
-        max_num_seqs=vllm_cfg["max_num_seqs"],
-        max_model_len=vllm_cfg["max_model_len"],
-        enable_prefix_caching=vllm_cfg["enable_prefix_caching"],
-        distributed_executor_backend=vllm_cfg["distributed_executor_backend"],
-        seed=vllm_cfg["seed"],
-    )
+    All parameters in cfg["vllm"] are passed directly to vLLM.
+    """
+    return LLM(model=cfg["model_name"], **cfg["vllm"])
 
 
 def build_sampling_params(cfg: dict, stop_token_ids: list[int], mode: str = "greedy") -> SamplingParams:
@@ -64,31 +52,17 @@ def build_sampling_params(cfg: dict, stop_token_ids: list[int], mode: str = "gre
 
     Returns:
         SamplingParams configured for the specified mode
+
+    For greedy mode, cfg["sampling"] is used with temperature forced to 0.
+    For scaling mode, cfg["scaling"] is passed directly.
     """
     if mode == "greedy":
-        sampling_cfg = cfg["sampling"]
-        return SamplingParams(
-            temperature=0.0,
-            top_p=1.0,
-            top_k=-1,
-            min_p=0.0,
-            max_tokens=sampling_cfg["max_tokens"],
-            repetition_penalty=sampling_cfg["repetition_penalty"],
-            frequency_penalty=sampling_cfg["frequency_penalty"],
-            presence_penalty=sampling_cfg["presence_penalty"],
-            stop_token_ids=stop_token_ids,
-            n=1,
-        )
+        # Use sampling config but force greedy decoding
+        params = {**cfg["sampling"], "temperature": 0.0, "n": 1, "stop_token_ids": stop_token_ids}
+        return SamplingParams(**params)
     else:  # scaling
-        scaling_cfg = cfg["scaling"]
-        return SamplingParams(
-            temperature=scaling_cfg["temperature"],
-            top_p=scaling_cfg["top_p"],
-            max_tokens=scaling_cfg["max_tokens"],
-            stop_token_ids=stop_token_ids,
-            n=scaling_cfg["n"],
-            logprobs=scaling_cfg["logprobs"],
-        )
+        params = {**cfg["scaling"], "stop_token_ids": stop_token_ids}
+        return SamplingParams(**params)
 
 
 def generate(llm: LLM, sampling_params: SamplingParams, rows: list[dict]) -> list[dict]:
