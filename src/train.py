@@ -7,6 +7,7 @@ import subprocess
 import threading
 from datetime import datetime
 
+import torch
 import yaml
 import datasets
 from accelerate import PartialState
@@ -195,6 +196,10 @@ def main():
         args=training_args,
         train_dataset=dataset,
         callbacks=callbacks,
+        model_init_kwargs={
+            "attn_implementation": "flash_attention_2",
+            "torch_dtype": torch.bfloat16,
+        },
     )
 
     # Train
