@@ -41,6 +41,10 @@ train:
     use_vllm: true
     gpu_memory_utilization: 0.9
 
+  logging:
+    logging_steps: 1
+    report_to: "wandb"
+
   wandb:
     project: "mathsmall-train"
     entity: null
