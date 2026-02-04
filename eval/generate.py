@@ -54,21 +54,41 @@ def build_llm(cfg: dict) -> LLM:
     )
 
 
-def build_sampling_params(cfg: dict, stop_token_ids: list[int]) -> SamplingParams:
-    """Build vllm.SamplingParams from the config dict."""
-    sampling_cfg = cfg["sampling"]
+def build_sampling_params(cfg: dict, stop_token_ids: list[int], mode: str = "greedy") -> SamplingParams:
+    """Build vllm.SamplingParams from the config dict.
 
-    return SamplingParams(
-        temperature=sampling_cfg["temperature"],
-        top_p=sampling_cfg["top_p"],
-        top_k=sampling_cfg["top_k"],
-        min_p=sampling_cfg["min_p"],
-        max_tokens=sampling_cfg["max_tokens"],
-        repetition_penalty=sampling_cfg["repetition_penalty"],
-        frequency_penalty=sampling_cfg["frequency_penalty"],
-        presence_penalty=sampling_cfg["presence_penalty"],
-        stop_token_ids=stop_token_ids,
-    )
+    Args:
+        cfg: Eval config dict
+        stop_token_ids: List of stop token IDs
+        mode: "greedy" for single deterministic completion, "scaling" for n stochastic completions
+
+    Returns:
+        SamplingParams configured for the specified mode
+    """
+    if mode == "greedy":
+        sampling_cfg = cfg["sampling"]
+        return SamplingParams(
+            temperature=0.0,
+            top_p=1.0,
+            top_k=-1,
+            min_p=0.0,
+            max_tokens=sampling_cfg["max_tokens"],
+            repetition_penalty=sampling_cfg["repetition_penalty"],
+            frequency_penalty=sampling_cfg["frequency_penalty"],
+            presence_penalty=sampling_cfg["presence_penalty"],
+            stop_token_ids=stop_token_ids,
+            n=1,
+        )
+    else:  # scaling
+        scaling_cfg = cfg["scaling"]
+        return SamplingParams(
+            temperature=scaling_cfg["temperature"],
+            top_p=scaling_cfg["top_p"],
+            max_tokens=scaling_cfg["max_tokens"],
+            stop_token_ids=stop_token_ids,
+            n=scaling_cfg["n"],
+            logprobs=scaling_cfg["logprobs"],
+        )
 
 
 def generate(llm: LLM, sampling_params: SamplingParams, rows: list[dict]) -> list[dict]:
