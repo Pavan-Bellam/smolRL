@@ -21,6 +21,7 @@ Usage:
 
 import argparse
 import sys
+import time
 from pathlib import Path
 
 import yaml
@@ -136,8 +137,19 @@ def main():
     print("  STEP 2: Generate responses")
     print(f"{'=' * 60}")
 
+    # Collect generation stats for W&B logging (empty if --skip-generate)
+    all_gen_stats = {}
+
     if not args.skip_generate:
-        from generate import build_llm, build_sampling_params, get_stop_token_ids, load_prompts, save_results
+        from generate import (
+            build_llm,
+            build_sampling_params,
+            compute_generation_stats,
+            get_stop_token_ids,
+            load_prompts,
+            print_generation_report,
+            save_results,
+        )
 
         # Initialize vLLM once
         print(f"\nInitializing vLLM with model: {eval_cfg['model_name']}")
@@ -158,7 +170,14 @@ def main():
             print(f"Loaded {len(rows)} prompts")
 
             prompts = [row["prompt"] for row in rows]
+
+            start = time.time()
             outputs = llm.generate(prompts, sampling_params)
+            elapsed = time.time() - start
+
+            gen_stats = compute_generation_stats(outputs, elapsed)
+            print_generation_report(gen_stats)
+            all_gen_stats[benchmark] = gen_stats
 
             if mode == "scaling":
                 # Extract all completions with logprobs
@@ -249,22 +268,10 @@ def main():
     if not args.no_wandb:
         wandb_cfg = eval_cfg.get("wandb", {})
         if wandb_cfg.get("enabled", True):
-            if mode == "scaling":
-                from report import log_scaling_to_wandb
+            from report import log_eval_results
 
-                for benchmark in args.benchmarks:
-                    paths = benchmark_paths[benchmark]
-                    stats = all_stats[benchmark]
-                    print(f"\n--- Logging {benchmark} (scaling) to W&B ---")
-                    log_scaling_to_wandb(stats, config, benchmark, str(paths["scored"]))
-            else:
-                from report import log_to_wandb
-
-                for benchmark in args.benchmarks:
-                    paths = benchmark_paths[benchmark]
-                    stats = all_stats[benchmark]
-                    print(f"\n--- Logging {benchmark} to W&B ---")
-                    log_to_wandb(stats, config, benchmark, str(paths["scored"]))
+            print(f"\nLogging {len(all_stats)} benchmark(s) to W&B...")
+            log_eval_results(all_stats, config, mode, all_gen_stats)
         else:
             print("W&B logging disabled in config.")
     else:
