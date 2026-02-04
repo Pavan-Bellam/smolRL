@@ -207,13 +207,12 @@ The `eval` section in `config.yaml` controls this step. There are three sub-sect
 | Field | Description |
 |-------|-------------|
 | `tensor_parallel_size` | Number of GPUs for tensor parallelism |
+| `data_parallel_size` | Number of data parallel replicas |
 | `gpu_memory_utilization` | Fraction of GPU memory vLLM is allowed to use (0.0–1.0) |
 | `swap_space` | CPU swap space in GB for KV cache offloading |
 | `dtype` | Model weight dtype (e.g. `bfloat16`, `float16`, `auto`) |
 | `enforce_eager` | Disable CUDA graphs when `true` (slower but uses less memory) |
-| `max_seq_len_to_capture` | Max sequence length for CUDA graph capture |
 | `max_num_seqs` | Max number of sequences processed concurrently in a batch |
-| `max_model_len` | Max total token length (prompt + generation) the engine supports |
 | `enable_prefix_caching` | Reuse KV cache for shared prompt prefixes across requests |
 | `distributed_executor_backend` | Backend for multi-GPU execution (`mp` for multiprocessing, `ray` for Ray) |
 | `seed` | Random seed for reproducibility |
