@@ -66,12 +66,12 @@ eval:
 
   vllm:
     tensor_parallel_size: 1
+    data_parallel_size: 1
     gpu_memory_utilization: 0.95
     swap_space: 4
     dtype: "bfloat16"
     enforce_eager: false
     max_num_seqs: 256
-    max_model_len: 16384
     enable_prefix_caching: true
     distributed_executor_backend: "mp"
     seed: 42
