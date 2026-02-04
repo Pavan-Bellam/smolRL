@@ -81,6 +81,15 @@ def compute_stats(rows: list[dict]) -> dict:
     response_lengths = [len(r["response"]) for r in rows]
     sorted_lengths = sorted(response_lengths)
 
+    def percentile(sorted_data: list, p: float) -> float:
+        """Calculate percentile using linear interpolation."""
+        if not sorted_data:
+            return 0
+        k = (len(sorted_data) - 1) * p
+        f = int(k)
+        c = f + 1 if f + 1 < len(sorted_data) else f
+        return sorted_data[f] + (k - f) * (sorted_data[c] - sorted_data[f])
+
     stats = {
         "total": total,
         "correct": correct,
@@ -90,7 +99,7 @@ def compute_stats(rows: list[dict]) -> dict:
         "response_length": {
             "mean": statistics.mean(response_lengths) if response_lengths else 0,
             "median": statistics.median(response_lengths) if response_lengths else 0,
-            "p90": sorted_lengths[int(len(sorted_lengths) * 0.9)] if sorted_lengths else 0,
+            "p90": percentile(sorted_lengths, 0.9),
         },
     }
 
