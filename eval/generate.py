@@ -17,6 +17,7 @@ Each output row is the same as input with `response` added:
 import argparse
 import json
 from pathlib import Path
+import time
 
 import yaml
 from transformers import AutoTokenizer
@@ -65,15 +66,72 @@ def build_sampling_params(cfg: dict, stop_token_ids: list[int], mode: str = "gre
         return SamplingParams(**params)
 
 
-def generate(llm: LLM, sampling_params: SamplingParams, rows: list[dict]) -> list[dict]:
-    """Run inference and attach response field to each row."""
+def compute_generation_stats(outputs: list, elapsed: float) -> dict:
+    """Compute generation statistics from vLLM outputs.
+
+    Args:
+        outputs: List of vLLM RequestOutput objects
+        elapsed: Time elapsed in seconds
+
+    Returns:
+        Dict with generation stats (tokens, throughput, etc.)
+    """
+    num_prompts = len(outputs)
+    total_input_tokens = sum(len(o.prompt_token_ids) for o in outputs)
+    # Sum tokens across all completions (handles both greedy and scaling modes)
+    total_output_tokens = sum(
+        len(c.token_ids) for o in outputs for c in o.outputs
+    )
+    num_completions = sum(len(o.outputs) for o in outputs)
+
+    return {
+        "num_prompts": num_prompts,
+        "num_completions": num_completions,
+        "input_tokens": total_input_tokens,
+        "output_tokens": total_output_tokens,
+        "elapsed_seconds": elapsed,
+        "throughput_output": total_output_tokens / elapsed if elapsed > 0 else 0,
+        "throughput_total": (total_input_tokens + total_output_tokens) / elapsed if elapsed > 0 else 0,
+        "avg_output_length": total_output_tokens / num_completions if num_completions > 0 else 0,
+    }
+
+
+def print_generation_report(stats: dict) -> None:
+    """Pretty-print generation statistics."""
+    print(f"\n{'=' * 60}")
+    print(f"  Generation Statistics")
+    print(f"{'=' * 60}")
+    print(f"  Prompts:           {stats['num_prompts']}")
+    if stats['num_completions'] != stats['num_prompts']:
+        print(f"  Completions:       {stats['num_completions']} ({stats['num_completions'] // stats['num_prompts']} per prompt)")
+    print(f"  Input tokens:      {stats['input_tokens']:,}")
+    print(f"  Output tokens:     {stats['output_tokens']:,}")
+    print(f"  Elapsed time:      {stats['elapsed_seconds']:.1f}s")
+    print(f"  Throughput (out):  {stats['throughput_output']:.1f} tok/s")
+    print(f"  Throughput (all):  {stats['throughput_total']:.1f} tok/s")
+    print(f"  Avg output len:    {stats['avg_output_length']:.0f} tokens")
+    print(f"{'=' * 60}\n")
+
+
+def generate(llm: LLM, sampling_params: SamplingParams, rows: list[dict]) -> tuple[list[dict], dict]:
+    """Run inference and attach response field to each row.
+
+    Returns:
+        Tuple of (rows with responses, generation stats dict)
+    """
     prompts = [row["prompt"] for row in rows]
+
+    start = time.time()
     outputs = llm.generate(prompts, sampling_params)
+    elapsed = time.time() - start
+
+    stats = compute_generation_stats(outputs, elapsed)
+    print_generation_report(stats)
 
     for row, output in zip(rows, outputs):
         row["response"] = output.outputs[0].text
 
-    return rows
+    return rows, stats
 
 
 def save_results(rows: list[dict], output_path: str) -> None:
@@ -130,7 +188,7 @@ def main(input_path: str, config_path: str, output_dir: str | None = None) -> No
     sampling_params = build_sampling_params(cfg, stop_token_ids)
 
     print(f"Running inference on {len(rows)} prompts...")
-    rows = generate(llm, sampling_params, rows)
+    rows, stats = generate(llm, sampling_params, rows)
 
     save_results(rows, output_path)
     print("Done.")
