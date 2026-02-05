@@ -688,3 +688,86 @@ For each benchmark:
 2. **Step 2 — Generate** (`generate.main`) → `eval/outputs/{name}_responses.jsonl`
 3. **Step 3 — Score** (`score.load_responses` → `score_all` → `compute_stats` → `save_results` → `print_report`) → `eval/outputs/{name}_scored.jsonl`
 4. **Step 4 — Report** (`report.log_to_wandb`) → W&B run (if enabled)
+
+---
+
+## 14. Unit Tests
+
+The eval pipeline has pytest unit tests in `eval/test_*.py` files.
+
+```bash
+pytest eval/ -v
+```
+
+| Test File | What It Tests |
+|-----------|---------------|
+| `test_grader.py` | Answer extraction (`extract_raw_boxed`), LaTeX normalization (`strip_string`, `_fix_fracs`, `_fix_sqrt`), numeric/symbolic comparison (`math_equal`, `numeric_equal`, `symbolic_equal`) |
+| `test_prepare_datasets.py` | GSM8K ground truth parsing (`parse_gsm8k_gt`), Qwen chat template formatting, benchmark config validation |
+| `test_score.py` | JSONL loading, row scoring, stats computation (accuracy, null rate, per-level/subject breakdowns), result saving |
+| `test_report.py` | Config flattening for W&B, W&B logging calls (mocked), run naming |
+
+---
+
+## 15. Test-Time Scaling (TTS)
+
+Test-time scaling generates multiple completions per problem and aggregates answers using voting strategies.
+
+### Overview
+
+```
+Step 2 (modified)         Step 3 (new)              Step 4 (modified)
+GENERATE          --->    SCORE_SCALING    --->     REPORT
+n completions/prompt      vote at each k            scaling curves
+```
+
+### eval/voting.py
+
+Implements four voting strategies for aggregating completions:
+
+| Strategy | Function | Description |
+|----------|----------|-------------|
+| Naive Majority | `naive_majority_vote()` | Each completion = 1 vote; most frequent answer wins |
+| Weighted Vote | `logprob_weighted_vote()` | Weight by model confidence: `exp(cumulative_logprob)` |
+| Shortest Majority | `shortest_majority_vote()` | Vote among the k shortest completions (by token count) |
+| Shortest + Weighted | `shortest_weighted_vote()` | Logprob-weighted vote among k shortest completions |
+
+**Key helper functions:**
+
+| Function | Purpose |
+|----------|---------|
+| `extract_answers()` | Extract and normalize `\boxed{}` answers from all completions |
+| `group_by_equivalence()` | Group completions by answer equivalence using `math_equal()` |
+
+### eval/score_scaling.py
+
+Scoring orchestrator that runs all voting strategies at multiple k values.
+
+**k values:** `[1, 4, 8, 12, 16, 24, 32]` (filtered to k ≤ n)
+
+| Function | Purpose |
+|----------|---------|
+| `score_row_scaling()` | Score one problem with all strategies at all k values |
+| `score_all_scaling()` | Score all problems |
+| `compute_scaling_stats()` | Aggregate accuracy per strategy per k |
+| `print_scaling_report()` | Pretty-print scaling results to console |
+
+### Output Format
+
+Scored JSONL includes `voting_results` with nested structure:
+
+```json
+{
+  "prompt": "...",
+  "ground_truth": "42",
+  "completions": [...],
+  "voting_results": {
+    "naive": {
+      "k8": {"answer": "42", "correct": true, "metadata": {...}},
+      "k16": {"answer": "42", "correct": true, "metadata": {...}}
+    },
+    "weighted": {...},
+    "smv": {...},
+    "smv_weighted": {...}
+  }
+}
+```
