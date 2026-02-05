@@ -36,6 +36,8 @@ MathSmall/
 │   ├── generate.py                # Step 2: vLLM offline inference
 │   ├── grader.py                  # Answer extraction + comparison logic
 │   ├── score.py                   # Step 3: Score responses against ground truth
+│   ├── voting.py                  # Voting strategies for scaling mode
+│   ├── score_scaling.py           # Scoring orchestrator for scaling mode
 │   ├── report.py                  # Step 4: W&B logging
 │   ├── run.py                     # Pipeline entry point (steps 1-4)
 │   ├── data/                      # Prepared benchmark JSONL files (generated)
@@ -205,13 +207,12 @@ The `eval` section in `config.yaml` controls this step. There are three sub-sect
 | Field | Description |
 |-------|-------------|
 | `tensor_parallel_size` | Number of GPUs for tensor parallelism |
+| `data_parallel_size` | Number of data parallel replicas |
 | `gpu_memory_utilization` | Fraction of GPU memory vLLM is allowed to use (0.0–1.0) |
 | `swap_space` | CPU swap space in GB for KV cache offloading |
 | `dtype` | Model weight dtype (e.g. `bfloat16`, `float16`, `auto`) |
 | `enforce_eager` | Disable CUDA graphs when `true` (slower but uses less memory) |
-| `max_seq_len_to_capture` | Max sequence length for CUDA graph capture |
 | `max_num_seqs` | Max number of sequences processed concurrently in a batch |
-| `max_model_len` | Max total token length (prompt + generation) the engine supports |
 | `enable_prefix_caching` | Reuse KV cache for shared prompt prefixes across requests |
 | `distributed_executor_backend` | Backend for multi-GPU execution (`mp` for multiprocessing, `ray` for Ray) |
 | `seed` | Random seed for reproducibility |
@@ -390,9 +391,155 @@ eval:
 
 ---
 
-## 8. Training Pipeline
+## 8. Test-Time Compute Scaling Evaluation
 
-### Overview
+The eval pipeline supports a **scaling mode** for test-time compute scaling experiments. Instead of generating a single greedy response per problem, scaling mode generates `n` stochastic completions and applies multiple voting strategies to aggregate answers.
+
+### 8.1 Enabling Scaling Mode
+
+Set `mode: scaling` in `config.yaml` or use the `--mode` CLI flag:
+
+```bash
+# Via CLI (overrides config)
+python eval/run.py --mode scaling --benchmarks math500
+
+# Or set in config.yaml
+eval:
+  mode: "scaling"  # "greedy" | "scaling"
+```
+
+### 8.2 Scaling Configuration
+
+```yaml
+eval:
+  mode: "scaling"
+
+  scaling:
+    n: 16                    # samples per problem (16, 24, or 32)
+    temperature: 0.7
+    top_p: 0.95
+    max_tokens: 8192
+    logprobs: 1              # request logprobs for weighted voting
+```
+
+The `k_values` for evaluation are derived automatically from `n`:
+- `n=16` → `[1, 4, 8, 12, 16]`
+- `n=24` → `[1, 4, 8, 12, 16, 24]`
+- `n=32` → `[1, 4, 8, 12, 16, 24, 32]`
+
+### 8.3 Voting Strategies (eval/voting.py)
+
+Four voting strategies are implemented:
+
+| Strategy | Description |
+|----------|-------------|
+| **Naive Majority** | Each completion = 1 vote. Pick answer with most votes. |
+| **Weighted Vote** | Weight = `exp(cumulative_logprob)`. Sum weights per answer group. |
+| **Shortest Majority (SMV)** | Sort by token count, take k shortest, run naive majority. |
+| **Shortest + Weighted** | Sort by token count, take k shortest, run weighted vote. |
+
+All strategies:
+- Group completions by answer equivalence using `math_equal()`
+- Subsample at each k value (1, 4, 8, 12, 16, ...)
+- Handle null predictions (no `\boxed{}` found)
+
+### 8.4 Output Format (Scaling Mode)
+
+**Response file:** `eval/outputs/{benchmark}_scaling_responses.jsonl`
+
+```json
+{
+  "prompt": "...",
+  "ground_truth": "...",
+  "completions": [
+    {
+      "text": "Let me solve...\n$\\boxed{42}$",
+      "cumulative_logprob": -15.234,
+      "finish_reason": "stop",
+      "num_tokens": 512
+    }
+    // ... n completions
+  ]
+}
+```
+
+**Scored file:** `eval/outputs/{benchmark}_scaling_scored.jsonl`
+
+```json
+{
+  "prompt": "...",
+  "ground_truth": "...",
+  "completions": [...],
+  "voting_results": {
+    "naive": {
+      "k1": {"answer": "42", "correct": true, "metadata": {...}},
+      "k4": {"answer": "42", "correct": true, "metadata": {...}},
+      // ...
+    },
+    "weighted": {...},
+    "smv": {...},
+    "smv_weighted": {...}
+  }
+}
+```
+
+### 8.5 Console Output
+
+```
+==============================================================================
+  Scaling Report: math500  (n=16)
+==============================================================================
+  Total problems: 500
+
+  Strategy             k=1    k=4    k=8    k=12   k=16
+  ------------------------------------------------------------
+  Naive Majority       62.4%  68.2%  71.4%  72.8%  73.8%
+  Weighted Vote        62.4%  69.0%  72.1%  73.5%  74.2%
+  Shortest Majority    62.4%  67.8%  70.8%  72.0%  73.0%
+  Shortest+Weighted    62.4%  68.5%  71.5%  73.0%  73.5%
+==============================================================================
+```
+
+### 8.6 W&B Logging (Scaling Mode)
+
+The `log_scaling_to_wandb()` function logs:
+
+**Flat metrics:**
+- `{strategy}/k{k}/accuracy` — accuracy for each strategy at each k
+- `{strategy}/k{k}/correct` — correct count
+
+**Tables:**
+- `scaling_curves` — table with strategy, k, accuracy, correct, total
+
+**Line plots:**
+- `{strategy}_curve` — accuracy vs k for each strategy
+
+### 8.7 Key Functions
+
+**eval/voting.py:**
+
+| Function | Purpose |
+|----------|---------|
+| `extract_answers(completions)` | Extract and normalize answers from all completions |
+| `group_by_equivalence(completions)` | Group by answer equivalence using `math_equal()` |
+| `naive_majority_vote(completions, k)` | Naive voting on first k completions |
+| `logprob_weighted_vote(completions, k)` | Weighted voting on first k completions |
+| `shortest_majority_vote(completions, k)` | Naive voting on k shortest completions |
+| `shortest_weighted_vote(completions, k)` | Weighted voting on k shortest completions |
+
+**eval/score_scaling.py:**
+
+| Function | Purpose |
+|----------|---------|
+| `get_k_values(n)` | Get k values based on n (filters to values ≤ n) |
+| `score_row_scaling(row, k_values)` | Score one row with all strategies at all k |
+| `score_all_scaling(rows, k_values)` | Score all rows with progress bar |
+| `compute_scaling_stats(rows, k_values)` | Aggregate accuracy per strategy per k |
+| `print_scaling_report(stats, dataset_name)` | Pretty-print scaling results |
+
+---
+
+## 9. Training Pipeline
 
 Training uses GRPO (Group Relative Policy Optimization) via TRL to fine-tune a Qwen base model on mathematical reasoning. The key principle is **zero RL training** — reinforcement learning directly from the base model without prior supervised fine-tuning (SFT).
 
@@ -411,9 +558,9 @@ python -m src.train --config config.yaml --resume outputs/checkpoint-100
 
 ---
 
-## 9. Training Configuration Decisions
+## 10. Training Configuration Decisions
 
-### 9.1 Loss Type: DAPO
+### 10.1 Loss Type: DAPO
 
 ```yaml
 loss_type: "dapo"
@@ -423,7 +570,7 @@ loss_type: "dapo"
 
 **Why it matters:** Standard GRPO normalizes loss by sequence length, which biases the model toward shorter responses. For math reasoning, we want the model to develop longer chains of thought naturally. DAPO's length-rectified objective removes this bias, allowing response length to grow organically as the model learns to reason.
 
-### 9.2 KL Coefficient
+### 10.2 KL Coefficient
 
 ```yaml
 beta: 0.0001  # 1e-4
@@ -438,7 +585,7 @@ beta: 0.0001  # 1e-4
 
 For larger models (>14B), use `beta: 0.001` (1e-3) as they need more regularization.
 
-### 9.3 Asymmetric Clipping (DAPO)
+### 10.3 Asymmetric Clipping (DAPO)
 
 ```yaml
 epsilon: 0.2       # lower clip bound
@@ -453,7 +600,7 @@ epsilon_high: 0.28 # upper clip bound
 
 This prevents "entropy collapse" where the model becomes too confident too quickly and stops exploring.
 
-### 9.4 Overlong Filtering
+### 10.4 Overlong Filtering
 
 ```yaml
 mask_truncated_completions: true
@@ -463,7 +610,7 @@ mask_truncated_completions: true
 
 **Why it matters:** Truncated responses are incomplete reasoning — the model was cut off mid-thought. Training on these teaches nothing useful and can destabilize learning. By masking them, we only learn from complete reasoning chains.
 
-### 9.5 Entropy Token Filtering
+### 10.5 Entropy Token Filtering
 
 ```yaml
 top_entropy_quantile: 0.2
@@ -473,7 +620,7 @@ top_entropy_quantile: 0.2
 
 **Why it matters:** Low-entropy tokens are "easy" predictions the model is already confident about. High-entropy tokens are where the model is uncertain — these are the decision points that matter for reasoning. Focusing gradients on uncertain tokens makes learning more efficient.
 
-### 9.6 Generation Settings
+### 10.6 Generation Settings
 
 ```yaml
 num_generations: 8
@@ -487,7 +634,7 @@ temperature: 1.0
 | `max_completion_length` | 8192 | Long enough for multi-step reasoning. Truncation hurts learning. |
 | `temperature` | 1.0 | Full diversity in exploration. Lower temps reduce exploration too early. |
 
-### 9.7 Batch Size
+### 10.7 Batch Size
 
 ```yaml
 per_device_train_batch_size: 2
@@ -501,7 +648,7 @@ gradient_accumulation_steps: 16
 - 1024 is large enough for reliable gradient signal
 - With 8K training data, this gives ~62 steps per epoch — enough granularity to track learning
 
-### 9.8 Checkpoint Saving
+### 10.8 Checkpoint Saving
 
 ```yaml
 save_strategy: "steps"
@@ -520,7 +667,7 @@ save_total_limit: 3
 - Frequent saves reduce lost progress on failures
 - Limit prevents disk exhaustion on long runs
 
-### 9.9 S3 Checkpoint Uploads
+### 10.9 S3 Checkpoint Uploads
 
 ```yaml
 s3_checkpoint_path: "s3://bucket/checkpoints/"  # or null to disable
@@ -536,9 +683,9 @@ s3_checkpoint_path: "s3://bucket/checkpoints/"  # or null to disable
 
 ---
 
-## 10. Reward Function Design
+## 11. Reward Function Design
 
-### 10.1 Accuracy-Only Reward
+### 11.1 Accuracy-Only Reward
 
 ```python
 reward = 1.0 if answer_correct else 0.0
@@ -546,7 +693,7 @@ reward = 1.0 if answer_correct else 0.0
 
 **Why no format reward:** Format rewards (e.g., +0.5 for using `\boxed{}`) hinder exploration for base models. Early in training, the model doesn't know how to format answers — penalizing wrong format means penalizing correct mathematical reasoning. By using accuracy-only rewards, the model can explore freely and learn formatting naturally.
 
-### 10.2 Flexible Answer Extraction
+### 11.2 Flexible Answer Extraction
 
 The reward function uses multi-tier extraction:
 
@@ -558,7 +705,7 @@ The reward function uses multi-tier extraction:
 
 **Why:** Base models don't reliably use `\boxed{}` at first. Rigid extraction would give 0 reward to correct answers with wrong format, blocking learning. The fallback chain ensures correct reasoning gets rewarded regardless of presentation.
 
-### 10.3 Math Equality Comparison
+### 11.3 Math Equality Comparison
 
 Uses `math_equal()` from `eval/grader.py` with:
 - String normalization (LaTeX cleanup, fraction fixing)
@@ -569,29 +716,29 @@ Uses `math_equal()` from `eval/grader.py` with:
 
 ---
 
-## 11. Training Metrics
+## 12. Training Metrics
 
 Metrics are logged to W&B without affecting the reward signal.
 
-### 11.1 metrics/accuracy
+### 12.1 metrics/accuracy
 
 **What:** Fraction of completions with correct answers.
 
 **Why it matters:** Primary measure of learning progress. Should increase over training.
 
-### 11.2 metrics/format_rate
+### 12.2 metrics/format_rate
 
 **What:** Fraction of completions containing `\boxed{}`.
 
 **Why it matters:** Tracks whether the model learns to use the expected output format without being explicitly rewarded for it. If accuracy increases but format_rate stays low, the model is reasoning correctly but not presenting answers conventionally.
 
-### 11.3 metrics/accuracy_given_format
+### 12.3 metrics/accuracy_given_format
 
 **What:** Accuracy among completions that have `\boxed{}`.
 
 **Why it matters:** Tests the hypothesis "does formatting correlate with correctness?" If this is much higher than overall accuracy, the model uses `\boxed{}` when it's confident. If similar, formatting is independent of correctness.
 
-### 11.4 metrics/accuracy_without_format
+### 12.4 metrics/accuracy_without_format
 
 **What:** Accuracy among completions without `\boxed{}`.
 
@@ -608,7 +755,7 @@ Metrics are logged to W&B without affecting the reward signal.
 
 ---
 
-## 12. Dataset Format
+## 13. Dataset Format
 
 ### Download
 
@@ -643,18 +790,21 @@ The prompt uses Qwen's ChatML template. The model continues generating from `<|i
 
 ---
 
-## 13. eval/run.py
+## 14. eval/run.py
 
 Pipeline entry point that wires steps 1–4 together. This is what you actually run.
 
 ### Usage
 
 ```bash
-# Run full pipeline on all benchmarks
+# Run full pipeline on all benchmarks (greedy mode)
 python eval/run.py
 
 # Run on specific benchmarks
 python eval/run.py --benchmarks math500 gsm8k
+
+# Run in scaling mode (test-time compute scaling)
+python eval/run.py --mode scaling --benchmarks math500
 
 # Skip data prep (reuse existing JSONL)
 python eval/run.py --skip-prepare
@@ -679,8 +829,9 @@ python eval/run.py --config my_config.yaml --output_dir results/
 | `--skip-prepare` | off | Skip step 1 (reuse existing data JSONL) |
 | `--skip-generate` | off | Skip step 2 (reuse existing response JSONL) |
 | `--no-wandb` | off | Disable W&B logging regardless of config |
+| `--mode` | from config | `greedy` (single completion) or `scaling` (n completions with voting) |
 
-### Pipeline Flow
+### Pipeline Flow (Greedy Mode)
 
 For each benchmark:
 
@@ -688,6 +839,15 @@ For each benchmark:
 2. **Step 2 — Generate** (`generate.main`) → `eval/outputs/{name}_responses.jsonl`
 3. **Step 3 — Score** (`score.load_responses` → `score_all` → `compute_stats` → `save_results` → `print_report`) → `eval/outputs/{name}_scored.jsonl`
 4. **Step 4 — Report** (`report.log_to_wandb`) → W&B run (if enabled)
+
+### Pipeline Flow (Scaling Mode)
+
+For each benchmark:
+
+1. **Step 1 — Prepare** (same as greedy) → `eval/data/{name}.jsonl`
+2. **Step 2 — Generate** (n completions with logprobs) → `eval/outputs/{name}_scaling_responses.jsonl`
+3. **Step 3 — Score** (`score_scaling.score_all_scaling` with 4 voting strategies) → `eval/outputs/{name}_scaling_scored.jsonl`
+4. **Step 4 — Report** (`report.log_scaling_to_wandb` with scaling curves) → W&B run (if enabled)
 
 ---
 

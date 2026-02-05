@@ -45,7 +45,9 @@ MathSmall/
 │   ├── prepare_datasets.py        # Step 1: Download & format benchmarks
 │   ├── generate.py                # Step 2: vLLM offline inference
 │   ├── grader.py                  # Answer extraction + comparison logic
-│   ├── score.py                   # Step 3: Score responses against ground truth
+│   ├── score.py                   # Step 3: Score responses (greedy mode)
+│   ├── voting.py                  # Voting strategies for scaling mode
+│   ├── score_scaling.py           # Scoring orchestrator for scaling mode
 │   ├── report.py                  # Step 4: W&B logging
 │   ├── run.py                     # Pipeline entry point (steps 1-4)
 │   ├── data/                      # Prepared benchmark JSONL files (generated)
@@ -237,7 +239,7 @@ PREPARE    --->     GENERATE    --->    SCORE      --->     REPORT
 datasets            responses           answers             results
 ```
 
-### Run the full pipeline
+### Run the full pipeline (greedy mode)
 
 ```bash
 python eval/run.py
@@ -247,6 +249,34 @@ python eval/run.py
 
 ```bash
 python eval/run.py --benchmarks math500 gsm8k
+```
+
+### Test-Time Compute Scaling
+
+Run scaling mode to generate n completions per problem and evaluate with multiple voting strategies:
+
+```bash
+# Run scaling evaluation
+python eval/run.py --mode scaling --benchmarks math500
+
+# Works with all benchmarks
+python eval/run.py --mode scaling --benchmarks math500 gsm8k aime24
+```
+
+Scaling mode evaluates 4 voting strategies at k=1,4,8,12,16,...:
+- **Naive Majority** - each completion = 1 vote
+- **Weighted Vote** - weight by exp(logprob)
+- **Shortest Majority (SMV)** - vote among k shortest completions
+- **Shortest + Weighted** - weighted vote among k shortest
+
+Configure in `config.yaml`:
+```yaml
+eval:
+  mode: "scaling"
+  scaling:
+    n: 16              # samples per problem
+    temperature: 0.7
+    top_p: 0.95
 ```
 
 ### Skip steps (resume from intermediate outputs)

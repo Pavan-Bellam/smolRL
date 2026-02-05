@@ -17,6 +17,7 @@ Each output row is the same as input with `response` added:
 import argparse
 import json
 from pathlib import Path
+import time
 
 import yaml
 from transformers import AutoTokenizer
@@ -35,51 +36,102 @@ def load_prompts(jsonl_path: str) -> list[dict]:
 
 
 def build_llm(cfg: dict) -> LLM:
-    """Build a vllm.LLM instance from the config dict."""
-    model_name = cfg["model_name"]
-    vllm_cfg = cfg["vllm"]
+    """Build a vllm.LLM instance from the config dict.
 
-    return LLM(
-        model=model_name,
-        tensor_parallel_size=vllm_cfg["tensor_parallel_size"],
-        gpu_memory_utilization=vllm_cfg["gpu_memory_utilization"],
-        swap_space=vllm_cfg["swap_space"],
-        dtype=vllm_cfg["dtype"],
-        enforce_eager=vllm_cfg["enforce_eager"],
-        max_num_seqs=vllm_cfg["max_num_seqs"],
-        max_model_len=vllm_cfg["max_model_len"],
-        enable_prefix_caching=vllm_cfg["enable_prefix_caching"],
-        distributed_executor_backend=vllm_cfg["distributed_executor_backend"],
-        seed=vllm_cfg["seed"],
+    All parameters in cfg["vllm"] are passed directly to vLLM.
+    """
+    return LLM(model=cfg["model_name"], **cfg["vllm"])
+
+
+def build_sampling_params(cfg: dict, stop_token_ids: list[int], mode: str = "greedy") -> SamplingParams:
+    """Build vllm.SamplingParams from the config dict.
+
+    Args:
+        cfg: Eval config dict
+        stop_token_ids: List of stop token IDs
+        mode: "greedy" for single deterministic completion, "scaling" for n stochastic completions
+
+    Returns:
+        SamplingParams configured for the specified mode
+
+    For greedy mode, cfg["sampling"] is used with temperature forced to 0.
+    For scaling mode, cfg["scaling"] is passed directly.
+    """
+    if mode == "greedy":
+        # Use sampling config but force greedy decoding
+        params = {**cfg["sampling"], "temperature": 0.0, "n": 1, "stop_token_ids": stop_token_ids}
+        return SamplingParams(**params)
+    else:  # scaling
+        params = {**cfg["scaling"], "stop_token_ids": stop_token_ids}
+        return SamplingParams(**params)
+
+
+def compute_generation_stats(outputs: list, elapsed: float) -> dict:
+    """Compute generation statistics from vLLM outputs.
+
+    Args:
+        outputs: List of vLLM RequestOutput objects
+        elapsed: Time elapsed in seconds
+
+    Returns:
+        Dict with generation stats (tokens, throughput, etc.)
+    """
+    num_prompts = len(outputs)
+    total_input_tokens = sum(len(o.prompt_token_ids) for o in outputs)
+    # Sum tokens across all completions (handles both greedy and scaling modes)
+    total_output_tokens = sum(
+        len(c.token_ids) for o in outputs for c in o.outputs
     )
+    num_completions = sum(len(o.outputs) for o in outputs)
+
+    return {
+        "num_prompts": num_prompts,
+        "num_completions": num_completions,
+        "input_tokens": total_input_tokens,
+        "output_tokens": total_output_tokens,
+        "elapsed_seconds": elapsed,
+        "throughput_output": total_output_tokens / elapsed if elapsed > 0 else 0,
+        "throughput_total": (total_input_tokens + total_output_tokens) / elapsed if elapsed > 0 else 0,
+        "avg_output_length": total_output_tokens / num_completions if num_completions > 0 else 0,
+    }
 
 
-def build_sampling_params(cfg: dict, stop_token_ids: list[int]) -> SamplingParams:
-    """Build vllm.SamplingParams from the config dict."""
-    sampling_cfg = cfg["sampling"]
+def print_generation_report(stats: dict) -> None:
+    """Pretty-print generation statistics."""
+    print(f"\n{'=' * 60}")
+    print(f"  Generation Statistics")
+    print(f"{'=' * 60}")
+    print(f"  Prompts:           {stats['num_prompts']}")
+    if stats['num_completions'] != stats['num_prompts']:
+        print(f"  Completions:       {stats['num_completions']} ({stats['num_completions'] // stats['num_prompts']} per prompt)")
+    print(f"  Input tokens:      {stats['input_tokens']:,}")
+    print(f"  Output tokens:     {stats['output_tokens']:,}")
+    print(f"  Elapsed time:      {stats['elapsed_seconds']:.1f}s")
+    print(f"  Throughput (out):  {stats['throughput_output']:.1f} tok/s")
+    print(f"  Throughput (all):  {stats['throughput_total']:.1f} tok/s")
+    print(f"  Avg output len:    {stats['avg_output_length']:.0f} tokens")
+    print(f"{'=' * 60}\n")
 
-    return SamplingParams(
-        temperature=sampling_cfg["temperature"],
-        top_p=sampling_cfg["top_p"],
-        top_k=sampling_cfg["top_k"],
-        min_p=sampling_cfg["min_p"],
-        max_tokens=sampling_cfg["max_tokens"],
-        repetition_penalty=sampling_cfg["repetition_penalty"],
-        frequency_penalty=sampling_cfg["frequency_penalty"],
-        presence_penalty=sampling_cfg["presence_penalty"],
-        stop_token_ids=stop_token_ids,
-    )
 
+def generate(llm: LLM, sampling_params: SamplingParams, rows: list[dict]) -> tuple[list[dict], dict]:
+    """Run inference and attach response field to each row.
 
-def generate(llm: LLM, sampling_params: SamplingParams, rows: list[dict]) -> list[dict]:
-    """Run inference and attach response field to each row."""
+    Returns:
+        Tuple of (rows with responses, generation stats dict)
+    """
     prompts = [row["prompt"] for row in rows]
+
+    start = time.time()
     outputs = llm.generate(prompts, sampling_params)
+    elapsed = time.time() - start
+
+    stats = compute_generation_stats(outputs, elapsed)
+    print_generation_report(stats)
 
     for row, output in zip(rows, outputs):
         row["response"] = output.outputs[0].text
 
-    return rows
+    return rows, stats
 
 
 def save_results(rows: list[dict], output_path: str) -> None:
@@ -136,7 +188,7 @@ def main(input_path: str, config_path: str, output_dir: str | None = None) -> No
     sampling_params = build_sampling_params(cfg, stop_token_ids)
 
     print(f"Running inference on {len(rows)} prompts...")
-    rows = generate(llm, sampling_params, rows)
+    rows, stats = generate(llm, sampling_params, rows)
 
     save_results(rows, output_path)
     print("Done.")
